@@ -1,3 +1,13 @@
+"""
+Compute the best angle for a solar panel based on an image of the surroundings
+
+Usage: sun.py file latitude longitude
+    where:
+        file is a spherical image
+        latitude is the latitude in degrees
+        longitude is the longitude in degrees
+"""
+
 import time
 import subprocess
 import sys
@@ -50,7 +60,8 @@ def sphere2xy(a, z):
 
 def extract_exif(file):
     o = subprocess.check_output(["exiftool", "-G", "-a", "-xmp:all", file]).decode()
-    return {r.split(":")[0][5:].strip(): r.split(":")[1].strip() for r in o.split("\n") if ":" in r}
+    print(o)
+    return {r.split(":", 1)[0][5:].strip(): r.split(":", 1)[1].strip() for r in o.split("\n") if ":" in r}
 
 
 if __name__ == "__main__":
@@ -93,12 +104,10 @@ if __name__ == "__main__":
             t_mask = mask.transpose([1, 2, 0])
             cv2.destroyAllWindows()
             img_c = cv2.addWeighted(img, 0.7, (t_mask*255)[1:-1, 1:-1], 0.3, 1)
-            cv2.imwrite("/tmp/sobel.jpg", sobel)
             cv2.imshow("Panorama", cv2.vconcat([img_c, sobel]))
             cv2.setMouseCallback("Panorama", clicked)
 
     sobel = cv2.cvtColor(sobel, cv2.COLOR_GRAY2BGR)
-    cv2.imwrite("/tmp/sobel.jpg", sobel)
     cv2.imshow("Panorama", cv2.vconcat([img, sobel]))
     cv2.setMouseCallback("Panorama", clicked)
     cv2.waitKey(0)
@@ -123,13 +132,14 @@ if __name__ == "__main__":
     I_ss = 0
     I_cs = 0
     I_c = 0
+    I_s = 0
     for d in range(0, 365):
         st = time.time()
         # img_c = img.copy()
         for i in range(0, p_len):
             h = i * dt
             #tm = datetime.datetime(2022, 5, 27, h//60, h%60, 0, tzinfo=pytz.timezone("US/Eastern")).timetuple()
-            a, z = get_sun_pos(d, h//60, h%60, 0, lat, long, -4)
+            a, z = get_sun_pos(d, h//60, h%60, 0, lat, long, 2)
             # print("{} -> day {} hour {}, Sun at position {}, {}\n".format(time.asctime(tm), tm.tm_yday, tm.tm_hour, a*180/pi, z*180/pi))
             positions[i, 0] = a
             positions[i, 1] = z
@@ -145,32 +155,51 @@ if __name__ == "__main__":
             pt = sphere2xy(a, z)
             if 0 <= pt[1] < height and 0 <= pt[0] < width and mask[2, pt[1]+1, pt[0]+1]:
                 cv2.circle(img, pt, 10, (0, 0, 255), -1)
-                dI_ss = (dt * 60) * sin(a) * sin(z) * 1353 * 0.7**((cos(z))**-0.678)
-                dI_cs = (dt * 60) * cos(a) * sin(z) * 1353 * 0.7**((cos(z))**-0.678)
-                dI_c = (dt * 60) * cos(z) * 1353 * 0.7**((cos(z))**-0.678)
+                insolation = 1353 * 0.7**((cos(z))**-0.678)
+                #insolation = 45
+                dI_ss = (dt * 60) * sin(a) * sin(z) * insolation
+                dI_cs = (dt * 60) * cos(a) * sin(z) * insolation
+                dI_c = (dt * 60) * cos(z) * insolation
+                dI_s = (dt * 60) * sin(z) * insolation
                 # print(a, z, dI_ss, dI_cs, dI_c)
                 I_ss += dI_ss
                 I_cs += dI_cs
                 I_c += dI_c
+                I_s += dI_s
             else:
                 cv2.circle(img, pt, 10, (100, 100, 100), -1)
 
-            if (t % (60*24/15)) == 4*18 + 3:
-                cv2.circle(img, pt, 10, (0, 255, 255), -1)
-
             t += 1
 
-    best_az = arctan(I_ss / I_cs) + pi
-    best_ze = arctan((sin(best_az)*I_ss + cos(best_az)*I_cs) / (I_c))
+    f_best_az = arctan(I_ss / I_cs) + pi
+    f_best_ze = arctan((sin(f_best_az) * I_ss + cos(f_best_az) * I_cs) / (I_c))
+    h_best_ze = arctan(I_s / I_c)
+    f_energy = sin(f_best_az) * sin(f_best_ze) * I_ss + cos(f_best_az) * sin(f_best_ze) * I_cs + cos(f_best_ze) * I_c
+    h_energy = sin(h_best_ze)*I_s + cos(h_best_ze)*I_c
     # without sin: 2361348871.1300774
     # with sin:    2349379502.0488343
-    print("Best solar panel azimuth angle: {}".format(best_az * 180/pi))
-    print("Best solar panel zenith angle:  {}".format(best_ze * 180/pi), arctan((I_ss**2 + I_cs**2)**0.5 / I_c) * 180/pi)
-    print("Total energy:                   {} J/m^2".format(sin(best_az)*sin(best_ze)*I_ss + cos(best_az)*sin(best_ze)*I_cs + cos(best_ze)*I_c))
-    pt = sphere2xy(best_az, best_ze)
+    print("Fixed panel:")
+    print("    Best solar panel azimuth angle: {}".format(f_best_az * 180 / pi))
+    print("    Best solar panel zenith angle:  {}".format(f_best_ze * 180 / pi), arctan((I_ss ** 2 + I_cs ** 2) ** 0.5 / I_c) * 180 / pi)
+    print("    Total energy (J):               {} J/m^2/year".format(f_energy))
+    print("    Total energy (kWh):             {} kWh/m^2/year".format(f_energy / 3600000))
+    print("    Average power:                  {} W/m^2".format(f_energy / (365 * 24 * 3600)))
+    print("Horizontally tracking panel:")
+    print("    Best solar panel zenith angle:  {}".format(h_best_ze * 180 / pi))
+    print("    Total energy (J):               {} J/m^2/year".format(h_energy))
+    print("    Total energy (kWh):             {} kWh/m^2/year".format(h_energy / 3600000))
+    print("    Average power:                  {} W/m^2".format(h_energy / (365 * 24 * 3600)))
+    print("Computed parameters:")
+    print("    I_ss:                           {} J/m^2".format(I_ss))
+    print("    I_cs:                           {} J/m^2".format(I_cs))
+    print("    I_c:                            {} J/m^2".format(I_c))
+    print("    I_s:                            {} J/m^2".format(I_s))
+    pt = sphere2xy(f_best_az, f_best_ze)
+    h_height = sphere2xy(0, h_best_ze)
     cv2.circle(img, pt, 50, (0, 255, 0), -1)
     cv2.circle(img, (pt[0], -pt[1]), 50, (0, 255, 255), -1)
     cv2.line(img, (pt[0], 0), (pt[0], height), (0, 255, 0), 5)
+    cv2.line(img, (0, h_height[1]), (img.shape[1], h_height[1]), (0, 255, 255), 5)
 
     cv2.destroyAllWindows()
     cv2.imwrite("/tmp/final.jpg", img)
